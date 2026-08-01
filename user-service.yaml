@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-service
+  namespace: microservices
+  labels:
+    app.kubernetes.io/name: user-service
+    app.kubernetes.io/part-of: node-microservices-demo
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: user-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: user-service
+        app.kubernetes.io/part-of: node-microservices-demo
+    spec:
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: user-service
+          image: node:22-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["node"]
+          args:
+            - "-e"
+            - |
+              const http = require('http');
+              const port = Number(process.env.PORT || 3000);
+              const service = process.env.SERVICE_NAME || 'user-service';
+              const users = [
+                { id: 1, name: 'Asha', email: 'asha@example.com' },
+                { id: 2, name: 'Ravi', email: 'ravi@example.com' }
+              ];
+              const send = (res, status, body) => {
+                res.writeHead(status, { 'content-type': 'application/json' });
+                res.end(JSON.stringify(body));
+              };
+              const server = http.createServer((req, res) => {
+                const path = new URL(req.url, 'http://localhost').pathname;
+                console.log(`${new Date().toISOString()} ${req.method} ${path}`);
+                if (path === '/health' || path === '/ready') return send(res, 200, { status: 'ok', service });
+                if (path === '/' || path === '/api/users' || path === '/users') return send(res, 200, { service, users });
+                return send(res, 404, { error: 'Not found', service, path });
+              });
+              server.listen(port, '0.0.0.0', () => console.log(`${service} listening on ${port}`));
+              process.on('SIGTERM', () => server.close(() => process.exit(0)));
+
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "3000"
+            - name: SERVICE_NAME
+              value: "user-service"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: ["ALL"]

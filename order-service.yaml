@@ -1,0 +1,125 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+  namespace: microservices
+  labels:
+    app.kubernetes.io/name: order-service
+    app.kubernetes.io/part-of: node-microservices-demo
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: order-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: order-service
+        app.kubernetes.io/part-of: node-microservices-demo
+    spec:
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: order-service
+          image: node:22-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["node"]
+          args:
+            - "-e"
+            - |
+              const http = require('http');
+              const port = Number(process.env.PORT || 3002);
+              const service = process.env.SERVICE_NAME || 'order-service';
+              const userBase = process.env.USER_SERVICE_URL;
+              const productBase = process.env.PRODUCT_SERVICE_URL;
+              const send = (res, status, body) => {
+                res.writeHead(status, { 'content-type': 'application/json' });
+                res.end(JSON.stringify(body));
+              };
+              async function getJson(url) {
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), 2000);
+                try {
+                  const response = await fetch(url, { signal: controller.signal });
+                  if (!response.ok) throw new Error(`${url} returned ${response.status}`);
+                  return await response.json();
+                } finally { clearTimeout(timer); }
+              }
+              async function dependenciesHealthy() {
+                await Promise.all([getJson(`${userBase}/health`), getJson(`${productBase}/health`)]);
+              }
+              const server = http.createServer(async (req, res) => {
+                const path = new URL(req.url, 'http://localhost').pathname;
+                console.log(`${new Date().toISOString()} ${req.method} ${path}`);
+                try {
+                  if (path === '/health') return send(res, 200, { status: 'ok', service });
+                  if (path === '/ready') {
+                    await dependenciesHealthy();
+                    return send(res, 200, { status: 'ready', service, dependencies: ['user-service', 'product-service'] });
+                  }
+                  if (path === '/' || path === '/api/orders' || path === '/orders') {
+                    console.log(`Calling ${userBase}/api/users and ${productBase}/api/products`);
+                    const [userData, productData] = await Promise.all([
+                      getJson(`${userBase}/api/users`),
+                      getJson(`${productBase}/api/products`)
+                    ]);
+                    const order = {
+                      id: 5001,
+                      user: userData.users[0],
+                      items: [{ ...productData.products[0], quantity: 1 }],
+                      status: 'CONFIRMED'
+                    };
+                    return send(res, 200, { service, order, communication: 'order-service -> user-service + product-service' });
+                  }
+                  return send(res, 404, { error: 'Not found', service, path });
+                } catch (error) {
+                  console.error(`Dependency error: ${error.message}`);
+                  return send(res, 503, { error: 'Dependency unavailable', service, detail: error.message });
+                }
+              });
+              server.listen(port, '0.0.0.0', () => console.log(`${service} listening on ${port}`));
+              process.on('SIGTERM', () => server.close(() => process.exit(0)));
+
+          ports:
+            - name: http
+              containerPort: 3002
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "3002"
+            - name: SERVICE_NAME
+              value: "order-service"
+            - name: USER_SERVICE_URL
+              value: "http://user-service:3000"
+            - name: PRODUCT_SERVICE_URL
+              value: "http://product-service:3001"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop: ["ALL"]
